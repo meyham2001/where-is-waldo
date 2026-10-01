@@ -1,15 +1,19 @@
 "use client";
 
 import React, { useState } from "react";
-import { RoomState, Player } from "@/lib/game-types";
+import { RoomState, Player, Level } from "@/lib/game-types";
 import { Users, Copy, Check, Play, Crown, Sparkles, HelpCircle, Edit3, X, CheckCircle2, AlertCircle, Eye, UserPlus, RotateCcw, Square } from "lucide-react";
 import Image from "next/image";
 import InviteModal from "./InviteModal";
+import MapLineup from "./MapLineup";
 
 interface LobbyViewProps {
   room: RoomState;
   currentPlayer: Player | null;
   onJoin: (name: string, avatar: string, color: string) => void;
+  joinError?: string;
+  levels: Level[];
+  onSetLevels: (levelIds: number[]) => void;
   onStartGame: () => void;
   onRestartGame?: () => void;
   shareUrl: string;
@@ -33,6 +37,9 @@ export default function LobbyView({
   room,
   currentPlayer,
   onJoin,
+  joinError,
+  levels,
+  onSetLevels,
   onStartGame,
   onRestartGame,
   shareUrl,
@@ -54,7 +61,7 @@ export default function LobbyView({
     playersList.unshift(currentPlayer);
   }
 
-  const isHost = currentPlayer?.isHost || (playersList.length > 0 && playersList[0].id === currentPlayer?.id);
+  const isHost = Boolean(currentPlayer && currentPlayer.id === room.hostId);
 
   const handleCopyLink = () => {
     navigator.clipboard.writeText(shareUrl);
@@ -69,7 +76,7 @@ export default function LobbyView({
     setIsEditing(false);
   };
 
-  const roomDisplayName = room.roomId?.toLowerCase() === "dxd" ? "DXD Room" : `${(room.roomId || "").toUpperCase()} Room`;
+  const roomDisplayName = `${(room.roomId || "").toUpperCase()} Room`;
 
   return (
     <div className="max-w-4xl mx-auto space-y-8 py-6 px-4 relative">
@@ -84,7 +91,7 @@ export default function LobbyView({
           <span className="text-rose-500">{roomDisplayName}</span>
         </h1>
         <p className="text-slate-400 max-w-lg mx-auto text-sm md:text-base">
-          Battle with up to 10 DXD teammates! The first player to click Waldo in each round earns the point.
+          Battle with up to 10 teammates! The first player to click Waldo in each round earns the point.
         </p>
 
         {/* Quick Actions: Invite Team & Waldo Guide */}
@@ -97,7 +104,7 @@ export default function LobbyView({
             <UserPlus className="w-4 h-4" />
             <span>Invite Team to Room</span>
             <span className="bg-rose-800/60 px-2 py-0.5 rounded-md font-mono text-[11px] border border-rose-400/30">
-              {room.roomId?.toUpperCase() || "DXD"}
+              {room.roomId?.toUpperCase()}
             </span>
           </button>
 
@@ -188,6 +195,13 @@ export default function LobbyView({
                   </div>
                 </div>
 
+                {joinError && (
+                  <p className="text-xs text-rose-400 flex items-center gap-1.5">
+                    <AlertCircle className="w-3.5 h-3.5" />
+                    {joinError}
+                  </p>
+                )}
+
                 <button
                   type="submit"
                   className="w-full mt-2 bg-gradient-to-r from-rose-600 to-rose-500 hover:from-rose-500 hover:to-rose-400 text-white font-bold py-3 rounded-xl shadow-lg shadow-rose-600/30 transition-all flex items-center justify-center gap-2 text-sm"
@@ -271,7 +285,7 @@ export default function LobbyView({
               <li>When the host starts, a high-resolution scene appears for everyone.</li>
               <li>Zoom and pan smoothly using mouse wheel or pinch-drag.</li>
               <li>First player to click on Waldo wins the round point!</li>
-              <li>Leaderboard updates after every round across all 8 scenes.</li>
+              <li>Leaderboard updates after every round across every scene.</li>
             </ul>
           </div>
         </div>
@@ -332,7 +346,7 @@ export default function LobbyView({
                           <span className="text-sm font-semibold text-white truncate max-w-[120px]">
                             {p.name}
                           </span>
-                          {(p.isHost || (playersList.length > 0 && playersList[0].id === p.id)) && (
+                          {p.id === room.hostId && (
                             <Crown className="w-3.5 h-3.5 text-amber-400" />
                           )}
                         </div>
@@ -345,6 +359,16 @@ export default function LobbyView({
                   </div>
                 ))
               )}
+            </div>
+
+            {/* Map lineup: the host picks maps and their order before the game starts */}
+            <div className="pt-4 border-t border-slate-800">
+              <MapLineup
+                levels={levels}
+                selectedLevelIds={room.selectedLevelIds}
+                editable={isHost && room.status === "lobby"}
+                onChange={onSetLevels}
+              />
             </div>
 
             {/* Host / Player Action Area */}
@@ -409,7 +433,7 @@ export default function LobbyView({
                         className="flex-1 bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 hover:to-teal-400 text-white font-bold py-3.5 px-4 rounded-xl shadow-lg shadow-emerald-600/30 transition-all flex items-center justify-center gap-2.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
                       >
                         <Play className="w-4 h-4 fill-white" />
-                        <span>Start Game ({room.totalRounds || 8} Rounds)</span>
+                        <span>Start Game ({room.selectedLevelIds.length} {room.selectedLevelIds.length === 1 ? "Round" : "Rounds"})</span>
                       </button>
                     </div>
                   )}

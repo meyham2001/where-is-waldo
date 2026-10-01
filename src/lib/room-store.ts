@@ -1,5 +1,6 @@
 import { Redis } from "@upstash/redis";
-import { RoomState, Level } from "./game-types";
+import crypto from "crypto";
+import { RoomState, Player, Level } from "./game-types";
 import rawLevels from "../../data/levels.json";
 
 const levels = rawLevels as Level[];
@@ -9,9 +10,34 @@ const ROOM_TTL_SECONDS = 60 * 60 * 24;
 const MAX_WRITE_ATTEMPTS = 8;
 
 type PlayerInfo = { id: string; name: string; avatar: string; color: string };
+
+export const ROOM_NOT_FOUND = "Room not found. Ask the host for a fresh invite link.";
+
+// The host token is a secret held only by the creator's browser; it never leaves the server otherwise
+interface StoredRoom extends RoomState {
+  hostToken: string;
+}
+
+function toPublic(room: StoredRoom): RoomState {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { hostToken, ...publicRoom } = room;
+  return publicRoom;
+}
+
+function isHost(room: StoredRoom, hostToken: unknown) {
+  if (typeof hostToken !== "string" || !room.hostToken) return false;
+  const a = Buffer.from(hostToken);
+  const b = Buffer.from(room.hostToken);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+export function levelForRound(room: RoomState, roundIndex = room.currentRoundIndex): Level | null {
+  const levelId = room.selectedLevelIds[roundIndex];
+  return levels.find((l) => l.id === levelId) ?? null;
+}
 // Return NO_CHANGE from a mutation to skip the write (no version bump, no broadcast-worthy change)
 const NO_CHANGE = Symbol("no-change");
-type Mutation<T> = (room: RoomState) => T | typeof NO_CHANGE | { error: string };
+type Mutation<T> = (room: StoredRoom) => T | typeof NO_CHANGE | { error: string };
 
 // ---------------------------------------------------------------------------
 // Storage backends
@@ -23,9 +49,9 @@ type Mutation<T> = (room: RoomState) => T | typeof NO_CHANGE | { error: string }
 // ---------------------------------------------------------------------------
 
 interface RoomBackend {
-  load(roomId: string): Promise<RoomState | null>;
+  load(roomId: string): Promise<StoredRoom | null>;
   // Saves `room` only if the stored version still equals `expectedVersion`
-  saveIfVersion(room: RoomState, expectedVersion: number): Promise<boolean>;
+  saveIfVersion(room: StoredRoom, expectedVersion: number): Promise<boolean>;
 }
 
 const CAS_SCRIPT = `
@@ -47,7 +73,7 @@ function createRedisBackend(url: string, token: string): RoomBackend {
 
   return {
     async load(roomId) {
-      return (await redis.get<RoomState>(key(roomId))) ?? null;
+      return (await redis.get<StoredRoom>(key(roomId))) ?? null;
     },
     async saveIfVersion(room, expectedVersion) {
       const result = await redis.eval(
@@ -62,12 +88,12 @@ function createRedisBackend(url: string, token: string): RoomBackend {
 
 declare global {
   // eslint-disable-next-line no-var
-  var __WALDO_ROOMS__: Map<string, RoomState> | undefined;
+  var __WALDO_ROOMS__: Map<string, StoredRoom> | undefined;
 }
 
 function createMemoryBackend(): RoomBackend {
   if (!global.__WALDO_ROOMS__) {
-    global.__WALDO_ROOMS__ = new Map<string, RoomState>();
+    global.__WALDO_ROOMS__ = new Map<string, StoredRoom>();
   }
   const rooms = global.__WALDO_ROOMS__;
 
@@ -102,28 +128,31 @@ function normalizeId(roomId: string) {
   return roomId.toLowerCase().trim();
 }
 
-function newRoom(roomId: string): RoomState {
+const ROOM_CODE_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"; // no look-alikes (0/o, 1/l/i)
+
+function randomRoomCode(length = 6) {
+  const bytes = crypto.randomBytes(length);
+  return Array.from(bytes, (b) => ROOM_CODE_ALPHABET[b % ROOM_CODE_ALPHABET.length]).join("");
+}
+
+function newPlayer(player: PlayerInfo, isHost: boolean, existing?: Player) {
   const now = Date.now();
   return {
-    roomId,
-    version: 0,
-    status: "lobby",
-    hostId: "",
-    currentRoundIndex: 0,
-    totalRounds: levels.length,
-    roundStartTime: null,
-    roundResult: null,
-    players: {},
-    selectedLevelIds: levels.map((l) => l.id),
-    createdAt: now,
-    lastUpdated: now,
+    id: existing?.id ?? player.id,
+    name: player.name || existing?.name || "Player",
+    avatar: player.avatar || existing?.avatar || "🎩",
+    color: player.color || existing?.color || "#E11D48",
+    score: existing?.score ?? 0,
+    isHost,
+    joinedAt: existing?.joinedAt ?? now,
+    lastActive: now,
   };
 }
 
 /**
- * Loads the room (creating it if needed), applies `mutate`, and saves it atomically.
+ * Loads an existing room, applies `mutate`, and saves it atomically.
  * If another request wrote the room in the meantime, the mutation is retried on fresh state.
- * Returning `{ error }` from `mutate` aborts without saving.
+ * Returning `{ error }` from `mutate` aborts without saving; NO_CHANGE skips the write.
  */
 async function updateRoom<T>(
   roomId: string,
@@ -132,84 +161,137 @@ async function updateRoom<T>(
   const id = normalizeId(roomId);
 
   for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt++) {
-    const room = (await backend.load(id)) ?? newRoom(id);
-    const expectedVersion = room.version ?? 0;
+    const room = await backend.load(id);
+    if (!room) return { error: ROOM_NOT_FOUND };
+    const expectedVersion = room.version;
 
     const result = mutate(room);
     if (result && typeof result === "object" && "error" in result) {
       return { error: result.error };
     }
     if (result === NO_CHANGE) {
-      return { room: (await backend.load(id)) ?? room, result };
+      return { room: toPublic(room), result };
     }
 
     room.version = expectedVersion + 1;
     room.lastUpdated = Date.now();
     if (await backend.saveIfVersion(room, expectedVersion)) {
-      return { room, result: result as T };
+      return { room: toPublic(room), result: result as T };
     }
   }
 
   return { error: "Room is busy, please try again." };
 }
 
-export async function getOrCreateRoom(roomId: string): Promise<RoomState> {
-  const existing = await backend.load(normalizeId(roomId));
-  if (existing) return existing;
+function hostOnly<T>(hostToken: unknown, action: string, mutate: Mutation<T>): Mutation<T> {
+  return (room) => (isHost(room, hostToken) ? mutate(room) : { error: `Only the room host can ${action}.` });
+}
 
-  // Only the first request creates the room; a concurrent creator's room is kept as-is
-  const res = await updateRoom(roomId, (room) => (room.version ? NO_CHANGE : null));
-  return "error" in res ? newRoom(normalizeId(roomId)) : res.room;
+async function hostUpdate(
+  roomId: string,
+  hostToken: unknown,
+  action: string,
+  mutate: Mutation<unknown>
+): Promise<RoomState | { error: string }> {
+  const res = await updateRoom(roomId, hostOnly(hostToken, action, mutate));
+  return "error" in res ? res : res.room;
+}
+
+export async function createRoom(
+  host: PlayerInfo
+): Promise<{ room: RoomState; player: Player; hostToken: string } | { error: string }> {
+  for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt++) {
+    const now = Date.now();
+    const roomId = randomRoomCode();
+    const hostPlayer = newPlayer(host, true);
+    const room: StoredRoom = {
+      roomId,
+      version: 1,
+      status: "lobby",
+      hostId: hostPlayer.id,
+      hostToken: crypto.randomBytes(24).toString("base64url"),
+      currentRoundIndex: 0,
+      totalRounds: levels.length,
+      roundStartTime: null,
+      roundResult: null,
+      players: { [hostPlayer.id]: hostPlayer },
+      selectedLevelIds: levels.map((l) => l.id),
+      createdAt: now,
+      lastUpdated: now,
+    };
+
+    // Version 0 means "only if no room with this code exists yet"
+    if (await backend.saveIfVersion(room, 0)) {
+      return { room: toPublic(room), player: hostPlayer, hostToken: room.hostToken };
+    }
+  }
+  return { error: "Could not create a room, please try again." };
+}
+
+export async function getRoom(roomId: string): Promise<RoomState | null> {
+  const room = await backend.load(normalizeId(roomId));
+  return room ? toPublic(room) : null;
 }
 
 export async function joinRoom(
   roomId: string,
-  player: PlayerInfo
+  player: PlayerInfo,
+  hostToken?: unknown
 ): Promise<{ room: RoomState; playerId: string } | { error: string }> {
   const res = await updateRoom(roomId, (room) => {
-    const now = Date.now();
-
-    // Deduplicate: reuse the existing player with the same name in this room
     const cleanName = (player.name || "").trim().toLowerCase();
-    const existingByName = Object.values(room.players).find(
-      (p) => p.name.trim().toLowerCase() === cleanName
+    const sameName = Object.values(room.players).find(
+      (p) => p.name.trim().toLowerCase() === cleanName && p.id !== player.id
     );
 
-    const targetId = existingByName ? existingByName.id : player.id;
-    const existingPlayer = room.players[targetId];
-
-    if (!room.hostId) {
-      room.hostId = targetId;
+    // Taking over the host's seat requires the host token, so nobody becomes admin by typing the host's name
+    if (sameName && sameName.id === room.hostId && !isHost(room, hostToken)) {
+      return { error: "That nickname is taken by the host. Please pick another one." };
     }
 
-    room.players[targetId] = {
-      id: targetId,
-      name: player.name || existingPlayer?.name || "Player",
-      avatar: player.avatar || existingPlayer?.avatar || "🎩",
-      color: player.color || existingPlayer?.color || "#E11D48",
-      score: existingPlayer ? existingPlayer.score : 0,
-      isHost: room.hostId === targetId,
-      joinedAt: existingPlayer ? existingPlayer.joinedAt : now,
-      lastActive: now,
-    };
-
-    return targetId;
+    // Otherwise, rejoining under the same name (e.g. from another device) keeps that player's score
+    const existing = sameName ?? room.players[player.id];
+    const joined = newPlayer(player, (existing?.id ?? player.id) === room.hostId, existing);
+    room.players[joined.id] = joined;
+    return joined.id;
   });
 
   if ("error" in res) return res;
   return { room: res.room, playerId: res.result as string };
 }
 
+export async function setLevels(
+  roomId: string,
+  hostToken: unknown,
+  levelIds: unknown
+): Promise<RoomState | { error: string }> {
+  const validIds = new Set(levels.map((l) => l.id));
+  if (
+    !Array.isArray(levelIds) ||
+    levelIds.length === 0 ||
+    !levelIds.every((id) => validIds.has(id)) ||
+    new Set(levelIds).size !== levelIds.length
+  ) {
+    return { error: "Pick at least one map, each map at most once." };
+  }
+
+  return hostUpdate(roomId, hostToken, "choose the maps", (room) => {
+    if (room.status !== "lobby") {
+      return { error: "Maps can only be changed in the lobby." };
+    }
+    room.selectedLevelIds = levelIds as number[];
+    room.totalRounds = levelIds.length;
+    room.currentRoundIndex = 0;
+    return null;
+  });
+}
+
 export async function startRound(
   roomId: string,
-  hostId: string,
+  hostToken: unknown,
   roundIndex?: number
 ): Promise<RoomState | { error: string }> {
-  const res = await updateRoom(roomId, (room) => {
-    if (room.hostId !== hostId) {
-      return { error: "Only the room host can start the game." };
-    }
-
+  return hostUpdate(roomId, hostToken, "start the game", (room) => {
     const targetRound = typeof roundIndex === "number" ? roundIndex : room.currentRoundIndex;
 
     // Idempotent: a duplicate "start" for the round already in progress must not restart it
@@ -221,16 +303,14 @@ export async function startRound(
       return NO_CHANGE;
     }
 
-    if (targetRound >= levels.length) {
+    if (targetRound >= room.selectedLevelIds.length) {
       room.status = "finished";
       return null;
     }
 
-    // If starting from round 0, reset all player scores to 0
     if (targetRound === 0) {
-      for (const pid of Object.keys(room.players)) {
-        room.players[pid].score = 0;
-      }
+      resetRoomTo(room, "playing");
+      return null;
     }
 
     room.status = "playing";
@@ -239,8 +319,6 @@ export async function startRound(
     room.roundResult = null;
     return null;
   });
-
-  return "error" in res ? res : res.room;
 }
 
 export async function submitClick(
@@ -248,11 +326,11 @@ export async function submitClick(
   playerId: string,
   x: number,
   y: number
-): Promise<{ hit: boolean; room: RoomState; distance: number }> {
-  const room = await getOrCreateRoom(roomId);
-  const currentLevel = levels[room.currentRoundIndex];
+): Promise<{ hit: boolean; room: RoomState | null; distance: number }> {
+  const room = await getRoom(roomId);
+  const currentLevel = room && levelForRound(room);
 
-  if (!room.players[playerId] || room.status !== "playing" || !currentLevel) {
+  if (!room || !currentLevel || !room.players[playerId] || room.status !== "playing") {
     return { hit: false, room, distance: 999 };
   }
 
@@ -287,29 +365,22 @@ export async function submitClick(
   if ("error" in res) {
     return { hit: false, room, distance };
   }
-  if (res.result === NO_CHANGE) {
-    // Someone else won this round first
-    return { hit: false, room: res.room, distance };
-  }
-  return { hit: true, room: res.room, distance };
+  // NO_CHANGE: someone else won this round first
+  return { hit: res.result === true, room: res.room, distance };
 }
 
-export async function finishGameEarly(roomId: string, hostId: string): Promise<RoomState | { error: string }> {
-  const res = await updateRoom(roomId, (room) => {
-    if (room.hostId !== hostId) {
-      return { error: "Only the room host can end the game." };
-    }
+export async function finishGameEarly(roomId: string, hostToken: unknown) {
+  return hostUpdate(roomId, hostToken, "end the game", (room) => {
     room.status = "finished";
     return null;
   });
-  return "error" in res ? res : res.room;
 }
 
+// Keeps the host's chosen maps and their order
 function resetRoomTo(room: RoomState, status: "lobby" | "playing") {
   room.status = status;
   room.currentRoundIndex = 0;
-  room.totalRounds = levels.length;
-  room.selectedLevelIds = levels.map((l) => l.id);
+  room.totalRounds = room.selectedLevelIds.length;
   room.roundStartTime = status === "playing" ? Date.now() : null;
   room.roundResult = null;
   for (const pid of Object.keys(room.players)) {
@@ -317,26 +388,18 @@ function resetRoomTo(room: RoomState, status: "lobby" | "playing") {
   }
 }
 
-export async function resetGame(roomId: string, hostId: string): Promise<RoomState | { error: string }> {
-  const res = await updateRoom(roomId, (room) => {
-    if (room.hostId !== hostId) {
-      return { error: "Only the room host can reset the game." };
-    }
+export async function resetGame(roomId: string, hostToken: unknown) {
+  return hostUpdate(roomId, hostToken, "reset the game", (room) => {
     resetRoomTo(room, "lobby");
     return null;
   });
-  return "error" in res ? res : res.room;
 }
 
-export async function restartGame(roomId: string, hostId: string): Promise<RoomState | { error: string }> {
-  const res = await updateRoom(roomId, (room) => {
-    if (room.hostId !== hostId) {
-      return { error: "Only the room host can restart the game." };
-    }
+export async function restartGame(roomId: string, hostToken: unknown) {
+  return hostUpdate(roomId, hostToken, "restart the game", (room) => {
     resetRoomTo(room, "playing");
     return null;
   });
-  return "error" in res ? res : res.room;
 }
 
 export function getLevels(): Level[] {

@@ -42,15 +42,23 @@ http://localhost:3000
 
 ## 🌐 Deploying to Vercel (Zero Server Maintenance)
 
-### Option 1: Zero-Config Deployment (Built-in Serverless Sync)
-The app comes with an automated serverless polling/heartbeat fallback that works **out-of-the-box on Vercel** without needing any third-party accounts or environment variables.
+### Required: Shared Room Storage (Upstash Redis)
+Vercel runs the API on many short-lived serverless instances, so room state must live in a shared store. Without it, players see conflicting game states (e.g. the end-of-round screen looping).
 
-1. Push this repository to GitHub.
-2. Go to [Vercel](https://vercel.com) and click **"Add New Project"**.
-3. Import the repository and click **"Deploy"**.
-4. That's it! Share your Vercel URL with your colleagues.
+1. In your Vercel project, open **Storage → Create Database → Upstash for Redis** (free tier is plenty) and connect it to the project.
+2. Vercel injects `KV_REST_API_URL` and `KV_REST_API_TOKEN` automatically (`UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` also work).
+3. Redeploy. Rooms expire after 24 hours of inactivity.
 
-### Option 2: Ultra-Low Latency (<50ms) with Pusher Channels (Recommended for Fast Paced Play)
+Locally (`npm run dev`) the app falls back to in-memory storage, so no setup is needed.
+
+## 🎮 Hosting a Game
+
+1. On the home page, enter your nickname and click **Create Room**. You get a random room code and become the room's admin (the host key is stored in your browser only).
+2. In the lobby, pick which maps to play and drag them into order with the arrows.
+3. Share the invite link; players join with their own nickname.
+4. Click **Start Game** when everyone is in.
+
+### Optional: Ultra-Low Latency (<50ms) with Pusher Channels
 Pusher provides a 100% free tier (200k messages/day, 100 concurrent connections) with zero server setup:
 
 1. Create a free account at [pusher.com](https://pusher.com) and create a Channels app.
@@ -62,6 +70,10 @@ Pusher provides a 100% free tier (200k messages/day, 100 concurrent connections)
 3. Redeploy your project on Vercel.
 
 ---
+
+## 🖼️ Adding Maps
+
+Add the scene to `public/levels/` as WebP plus a 1280px-wide `-preview.webp` copy (shown while the full image loads), then add an entry to `data/levels.json`.
 
 ## 🎯 Calibrating Coordinates
 

@@ -3,6 +3,7 @@
 import React, { useEffect, useState, useRef, use } from "react";
 import { RoomState, Player, Level } from "@/lib/game-types";
 import { getPusherClient } from "@/lib/pusher-client";
+import { getHostToken } from "@/lib/host-session";
 import LobbyView from "@/components/LobbyView";
 import WaldoViewer from "@/components/WaldoViewer";
 import ScoreboardModal from "@/components/ScoreboardModal";
@@ -19,6 +20,12 @@ import rawLevels from "../../../../data/levels.json";
 
 const levels = rawLevels as Level[];
 
+// Rounds follow the host's chosen maps and order
+function levelForRound(room: RoomState, roundIndex: number): Level | null {
+  const levelId = room.selectedLevelIds[roundIndex];
+  return levels.find((l) => l.id === levelId) ?? null;
+}
+
 export default function RoomPage({
   params,
 }: {
@@ -28,7 +35,9 @@ export default function RoomPage({
   const roomId = resolvedParams.id.toLowerCase();
 
   const [room, setRoom] = useState<RoomState | null>(null);
-  const currentLevel: Level | null = room ? levels[room.currentRoundIndex] ?? null : null;
+  const [roomNotFound, setRoomNotFound] = useState(false);
+  const [joinError, setJoinError] = useState("");
+  const currentLevel = room ? levelForRound(room, room.currentRoundIndex) : null;
   const [currentPlayer, setCurrentPlayer] = useState<Player | null>(null);
   const [markers, setMarkers] = useState<ClickMarker[]>([]);
   const [elapsedTime, setElapsedTime] = useState("0.0");
@@ -72,7 +81,7 @@ export default function RoomPage({
         fetch(`/api/room/${roomId}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "join", player: parsed }),
+          body: JSON.stringify({ action: "join", player: parsed, hostToken: getHostToken(roomId) }),
         })
           .then((res) => res.json())
           .then((data) => {
@@ -95,6 +104,7 @@ export default function RoomPage({
     refreshInFlightRef.current = true;
     try {
       const res = await fetch(`/api/room/${roomId}`, { cache: "no-store" });
+      setRoomNotFound(res.status === 404);
       if (!res.ok) return;
       const data = await res.json();
       if (!applyRoom(data.room)) return;
@@ -106,7 +116,7 @@ export default function RoomPage({
         fetch(`/api/room/${roomId}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "join", player: activePlayer }),
+          body: JSON.stringify({ action: "join", player: activePlayer, hostToken: getHostToken(roomId) }),
         })
           .then((r) => r.json())
           .then((joined) => applyRoom(joined.room))
@@ -170,7 +180,7 @@ export default function RoomPage({
   // Preload the next map while players look at the round result, so it shows instantly
   useEffect(() => {
     if (!room) return;
-    const nextLevel = levels[room.currentRoundIndex + 1];
+    const nextLevel = levelForRound(room, room.currentRoundIndex + 1);
     if (nextLevel) {
       for (const src of [nextLevel.image.replace(/\.webp$/, "-preview.webp"), nextLevel.image]) {
         const img = new window.Image();
@@ -214,9 +224,10 @@ export default function RoomPage({
       const res = await fetch(`/api/room/${roomId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ ...payload, hostToken: getHostToken(roomId) }),
       });
       const data = await res.json();
+      if (!res.ok) console.error(`Action "${payload.action}" rejected:`, data.error);
       applyRoom(data.room);
     } catch (err) {
       console.error(`Action "${payload.action}" failed:`, err);
@@ -237,17 +248,19 @@ export default function RoomPage({
       lastActive: Date.now(),
     };
 
-    setCurrentPlayer(newPlayer);
-    localStorage.setItem(`waldo_player_${roomId}`, JSON.stringify(newPlayer));
-
+    setJoinError("");
     const res = await fetch(`/api/room/${roomId}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "join", player: newPlayer }),
+      body: JSON.stringify({ action: "join", player: newPlayer, hostToken: getHostToken(roomId) }),
     });
+    const data = await res.json().catch(() => ({}));
 
-    if (res.ok) {
-      const data = await res.json();
+    if (!res.ok) {
+      setJoinError(data.error || "Could not join the room.");
+      return;
+    }
+    {
       const activeP = data.player || data.room.players[id];
       if (activeP) {
         setCurrentPlayer(activeP);
@@ -257,27 +270,32 @@ export default function RoomPage({
     }
   };
 
+  const handleSetLevels = async (levelIds: number[]) => {
+    if (!currentPlayer?.isHost) return;
+    await postAction({ action: "set-levels", levelIds });
+  };
+
   const handleStartGame = async () => {
     if (!currentPlayer?.isHost) return;
     setMarkers([]);
-    await postAction({ action: "start", hostId: currentPlayer.id, roundIndex: 0 });
+    await postAction({ action: "start", roundIndex: 0 });
   };
 
   const handleNextRound = async () => {
     if (!currentPlayer?.isHost || !room) return;
     setMarkers([]);
     const nextIdx = room.currentRoundIndex + 1;
-    await postAction({ action: "start", hostId: currentPlayer.id, roundIndex: nextIdx });
+    await postAction({ action: "start", roundIndex: nextIdx });
   };
 
   const handleFinishGameEarly = async () => {
     if (!currentPlayer?.isHost || !room) return;
-    await postAction({ action: "finish", hostId: currentPlayer.id });
+    await postAction({ action: "finish" });
   };
 
   const handlePlayAgain = async () => {
     if (!currentPlayer?.isHost) return;
-    await postAction({ action: "reset", hostId: currentPlayer.id });
+    await postAction({ action: "reset" });
   };
 
   const handleResetToLobby = async () => {
@@ -285,14 +303,14 @@ export default function RoomPage({
     setMarkers([]);
     setHasOptedIntoActiveRound(false);
     wasInLobbyRef.current = true;
-    await postAction({ action: "reset", hostId: currentPlayer.id });
+    await postAction({ action: "reset" });
   };
 
   const handleRestartGame = async () => {
     if (!currentPlayer?.isHost || !room) return;
     setMarkers([]);
     setHasOptedIntoActiveRound(true);
-    await postAction({ action: "restart", hostId: currentPlayer.id });
+    await postAction({ action: "restart" });
   };
 
   const [confirmConfig, setConfirmConfig] = useState<{
@@ -336,7 +354,7 @@ export default function RoomPage({
     showConfirm({
       title: "Stop Game & Return to Lobby?",
       description:
-        "This will stop the active round for all DXD teammates and return everyone back to the lobby. Player scores will be reset to 0.",
+        "This will stop the active round for all players and return everyone back to the lobby. Player scores will be reset to 0.",
       badgeText: "Stop Active Match",
       confirmText: "Stop & Return to Lobby",
       cancelText: "Keep Playing",
@@ -401,6 +419,21 @@ export default function RoomPage({
     }
   };
 
+  if (roomNotFound) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-slate-950 text-white space-y-4 px-4 text-center">
+        <AlertCircle className="w-10 h-10 text-rose-500" />
+        <h1 className="text-xl font-bold">Room {roomId.toUpperCase()} doesn&apos;t exist</h1>
+        <p className="text-sm text-slate-400 max-w-sm">
+          The code may be mistyped, or the room expired after a day of inactivity. Ask the host for a fresh invite link, or host your own game.
+        </p>
+        <Link href="/" className="px-4 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-sm font-bold transition-colors">
+          Back to home
+        </Link>
+      </div>
+    );
+  }
+
   if (!room) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center bg-slate-950 text-white space-y-3">
@@ -448,6 +481,9 @@ export default function RoomPage({
           room={room}
           currentPlayer={currentPlayer}
           onJoin={handleJoin}
+          joinError={joinError}
+          onSetLevels={handleSetLevels}
+          levels={levels}
           onStartGame={handleStartGame}
           onRestartGame={requestRestartGame}
           shareUrl={shareUrl}
@@ -497,7 +533,7 @@ export default function RoomPage({
                 showConfirm({
                   title: "Stop Game & Return to Lobby?",
                   description:
-                    "As the room host, stopping the game will end the active round for all DXD teammates and return everyone to the lobby.",
+                    "As the room host, stopping the game will end the active round for all players and return everyone to the lobby.",
                   badgeText: "Host Action",
                   confirmText: "Stop & Return to Lobby",
                   cancelText: "Keep Playing",
@@ -508,7 +544,7 @@ export default function RoomPage({
               } else {
                 showConfirm({
                   title: "Leave Game?",
-                  description: "Are you sure you want to leave room DXD and return to the main menu?",
+                  description: `Are you sure you want to leave room ${roomId.toUpperCase()} and return to the main menu?`,
                   badgeText: "Leave Room",
                   confirmText: "Leave Game",
                   cancelText: "Stay in Game",
