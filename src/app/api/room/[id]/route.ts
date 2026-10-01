@@ -11,18 +11,24 @@ import {
 } from "@/lib/room-store";
 import { broadcastRoomUpdate } from "@/lib/pusher-server";
 
+// Room state must never be cached
+export const dynamic = "force-dynamic";
+
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const room = getOrCreateRoom(id);
+  const room = await getOrCreateRoom(id);
   const levels = getLevels();
 
-  return NextResponse.json({
-    room,
-    currentLevel: levels[room.currentRoundIndex] || null,
-  });
+  return NextResponse.json(
+    {
+      room,
+      currentLevel: levels[room.currentRoundIndex] || null,
+    },
+    { headers: { "Cache-Control": "no-store" } }
+  );
 }
 
 export async function POST(
@@ -34,18 +40,19 @@ export async function POST(
   const { action } = body;
   const levels = getLevels();
 
-  let room = getOrCreateRoom(id);
+  let room;
 
   if (action === "join") {
     const { player } = body;
     if (!player || !player.id || !player.name) {
       return NextResponse.json({ error: "Missing player info" }, { status: 400 });
     }
-    room = joinRoom(id, player);
-    const cleanName = player.name.trim().toLowerCase();
-    const joinedPlayer = Object.values(room.players).find(
-      (p) => p.name.trim().toLowerCase() === cleanName
-    ) || room.players[player.id];
+    const joined = await joinRoom(id, player);
+    if ("error" in joined) {
+      return NextResponse.json({ error: joined.error }, { status: 409 });
+    }
+    room = joined.room;
+    const joinedPlayer = room.players[joined.playerId];
 
     await broadcastRoomUpdate(id, "player-joined", { room, player: joinedPlayer });
     return NextResponse.json({ success: true, room, player: joinedPlayer });
@@ -53,7 +60,7 @@ export async function POST(
 
   if (action === "start") {
     const { hostId, roundIndex } = body;
-    const res = startRound(id, hostId, roundIndex);
+    const res = await startRound(id, hostId, roundIndex);
     if ("error" in res) {
       return NextResponse.json({ error: res.error }, { status: 403 });
     }
@@ -75,7 +82,7 @@ export async function POST(
       return NextResponse.json({ error: "Invalid click payload" }, { status: 400 });
     }
 
-    const { hit, room: updatedRoom, distance } = submitClick(id, playerId, x, y);
+    const { hit, room: updatedRoom, distance } = await submitClick(id, playerId, x, y);
 
     if (hit) {
       await broadcastRoomUpdate(id, "round-won", {
@@ -94,7 +101,7 @@ export async function POST(
 
   if (action === "finish") {
     const { hostId } = body;
-    const res = finishGameEarly(id, hostId);
+    const res = await finishGameEarly(id, hostId);
     if ("error" in res) {
       return NextResponse.json({ error: res.error }, { status: 403 });
     }
@@ -105,7 +112,7 @@ export async function POST(
 
   if (action === "reset") {
     const { hostId } = body;
-    const res = resetGame(id, hostId);
+    const res = await resetGame(id, hostId);
     if ("error" in res) {
       return NextResponse.json({ error: res.error }, { status: 403 });
     }
@@ -116,7 +123,7 @@ export async function POST(
 
   if (action === "restart") {
     const { hostId } = body;
-    const res = restartGame(id, hostId);
+    const res = await restartGame(id, hostId);
     if ("error" in res) {
       return NextResponse.json({ error: res.error }, { status: 403 });
     }

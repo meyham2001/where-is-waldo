@@ -3,7 +3,7 @@
     "id": 1,
     "title": "On the Beach",
     "subtitle": "The classic sunny seaside scramble (1987)",
-    "image": "/levels/level-1-beach.jpg",
+    "image": "/levels/level-1-beach.webp",
     "hint": "Check near the green windbreak in the upper-right section.",
     "target": {
       "x": 61.8,
@@ -15,7 +15,7 @@
     "id": 2,
     "title": "The Ski Slopes",
     "subtitle": "Sub-zero madness on the snowy mountainside",
-    "image": "/levels/level-2-skiing.jpg",
+    "image": "/levels/level-2-skiing.webp",
     "hint": "Waldo is carrying his backpack and cane right above the wooden cabin roof at the bottom right.",
     "target": {
       "x": 85.5,
@@ -27,7 +27,7 @@
     "id": 3,
     "title": "The Deep-Sea Divers",
     "subtitle": "Underwater mystery among mermaids, sea monsters, and divers",
-    "image": "/levels/level-3-ocean.jpg",
+    "image": "/levels/level-3-ocean.webp",
     "hint": "Waldo is in the blue-striped boat on the water surface, near the mermaid on the rock.",
     "target": {
       "x": 66.2,
@@ -39,7 +39,7 @@
     "id": 4,
     "title": "The Unfriendly Giants",
     "subtitle": "Tiny villagers dodging colossal strides",
-    "image": "/levels/level-4-giants.jpg",
+    "image": "/levels/level-4-giants.webp",
     "hint": "Behind the thatched-roof cottage in the lower left, holding a pitchfork with the villagers.",
     "target": {
       "x": 17.9,
@@ -51,7 +51,7 @@
     "id": 5,
     "title": "The Gobbling Gluttons",
     "subtitle": "A massive banquet of endless feasting and chaos",
-    "image": "/levels/level-5-food-court.jpg",
+    "image": "/levels/level-5-food-court.webp",
     "hint": "Beside the banquet table southwest of the spaghetti mound, next to the steam from the soup pot.",
     "target": {
       "x": 57.0,
@@ -63,7 +63,7 @@
     "id": 6,
     "title": "Dinosaurs, Spacemen, & Ghouls",
     "subtitle": "Hollywood movie set mayhem under the studio lights",
-    "image": "/levels/level-6-film-set.jpg",
+    "image": "/levels/level-6-film-set.webp",
     "hint": "Peeking out right behind the yellow canteen building roof, next to the man in the yellow jacket.",
     "target": {
       "x": 91.9,
@@ -75,7 +75,7 @@
     "id": 7,
     "title": "The Future Space Colony",
     "subtitle": "Lunar domes, flying saucers, and extraterrestrial crowds",
-    "image": "/levels/level-7-space-station.jpg",
+    "image": "/levels/level-7-space-station.webp",
     "hint": "Inside the left dome on the middle red tier balcony, watching the retro TV screen with Wenda.",
     "target": {
       "x": 40.6,
@@ -87,7 +87,7 @@
     "id": 8,
     "title": "Toys! Toys! Toys!",
     "subtitle": "An avalanche of miniature playroom figures and toy castles",
-    "image": "/levels/level-8-toys.jpg",
+    "image": "/levels/level-8-toys.webp",
     "hint": "In the playroom, behind the yellow giraffe and cowboy, next to the brown teddy bear covering its eyes.",
     "target": {
       "x": 17.2,

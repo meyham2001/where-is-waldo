@@ -13,6 +13,11 @@ interface WaldoViewerProps {
   markers?: ClickMarker[];
 }
 
+// Low-res copy generated next to each scene (`level-1-beach.webp` -> `level-1-beach-preview.webp`)
+function previewSrc(src: string) {
+  return src.replace(/\.webp$/, "-preview.webp");
+}
+
 export default function WaldoViewer({
   imageSrc,
   levelTitle,
@@ -28,6 +33,7 @@ export default function WaldoViewer({
   const [position, setPosition] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
   const [imageLoaded, setImageLoaded] = useState(false);
+  const [fullResLoaded, setFullResLoaded] = useState(false);
   const [isAnimating, setIsAnimating] = useState(false);
 
   // Synchronous refs for smooth 60/120fps gesture updates without closure lag
@@ -44,7 +50,16 @@ export default function WaldoViewer({
     setScale(1);
     setPosition({ x: 0, y: 0 });
     setImageLoaded(false);
+    setFullResLoaded(false);
     setIsAnimating(false);
+
+    // Show the small preview immediately and swap in the full-res scene once it has downloaded
+    const fullRes = new window.Image();
+    fullRes.onload = () => setFullResLoaded(true);
+    fullRes.src = imageSrc;
+    return () => {
+      fullRes.onload = null;
+    };
   }, [imageSrc]);
 
   // When target is revealed, smoothly auto-pan and zoom to Waldo!
@@ -280,6 +295,12 @@ export default function WaldoViewer({
           <p className="text-sm font-medium text-slate-400">Loading high-res scene: {levelTitle}...</p>
         </div>
       )}
+      {imageLoaded && !fullResLoaded && (
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2 bg-slate-900/90 border border-slate-700/80 rounded-full px-3 py-1.5 text-xs text-slate-300 pointer-events-none">
+          <div className="w-3 h-3 border-2 border-rose-500 border-t-transparent rounded-full animate-spin" />
+          Loading full detail...
+        </div>
+      )}
 
       {/* Interactive pan/zoom container */}
       <div
@@ -304,11 +325,12 @@ export default function WaldoViewer({
         >
           <img
             ref={imageRef}
-            src={imageSrc}
+            src={fullResLoaded ? imageSrc : previewSrc(imageSrc)}
             alt={levelTitle}
             draggable={false}
+            decoding="async"
             onLoad={handleImageLoad}
-            className="max-w-none max-h-[76vh] md:max-h-[82vh] w-auto h-auto object-contain pointer-events-none rounded shadow-md"
+            className="max-w-none h-[76vh] md:h-[82vh] w-auto object-contain pointer-events-none rounded shadow-md"
           />
 
           {/* Overlaid Click & Target feedback (scales with image) */}
