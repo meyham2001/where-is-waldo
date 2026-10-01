@@ -37,6 +37,8 @@ export interface RoundResult {
 
 export interface RoomState {
   roomId: string;
+  // Incremented on every write; clients ignore room snapshots older than the one they have
+  version: number;
   status: GameStatus;
   hostId: string;
   currentRoundIndex: number;

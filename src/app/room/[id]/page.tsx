@@ -3,6 +3,7 @@
 import React, { useEffect, useState, useRef, use } from "react";
 import { RoomState, Player, Level } from "@/lib/game-types";
 import { getPusherClient } from "@/lib/pusher-client";
+import { getHostToken } from "@/lib/host-session";
 import LobbyView from "@/components/LobbyView";
 import WaldoViewer from "@/components/WaldoViewer";
 import ScoreboardModal from "@/components/ScoreboardModal";
@@ -15,6 +16,15 @@ import { ClickMarker } from "@/components/ClickFeedback";
 import { Timer, Home, Trophy, Eye, X, CheckCircle2, AlertCircle, UserPlus, RotateCcw, Square, LogOut } from "lucide-react";
 import Link from "next/link";
 import Image from "next/image";
+import rawLevels from "../../../../data/levels.json";
+
+const levels = rawLevels as Level[];
+
+// Rounds follow the host's chosen maps and order
+function levelForRound(room: RoomState, roundIndex: number): Level | null {
+  const levelId = room.selectedLevelIds[roundIndex];
+  return levels.find((l) => l.id === levelId) ?? null;
+}
 
 export default function RoomPage({
   params,
@@ -25,7 +35,9 @@ export default function RoomPage({
   const roomId = resolvedParams.id.toLowerCase();
 
   const [room, setRoom] = useState<RoomState | null>(null);
-  const [currentLevel, setCurrentLevel] = useState<Level | null>(null);
+  const [roomNotFound, setRoomNotFound] = useState(false);
+  const [joinError, setJoinError] = useState("");
+  const currentLevel = room ? levelForRound(room, room.currentRoundIndex) : null;
   const [currentPlayer, setCurrentPlayer] = useState<Player | null>(null);
   const [markers, setMarkers] = useState<ClickMarker[]>([]);
   const [elapsedTime, setElapsedTime] = useState("0.0");
@@ -36,10 +48,26 @@ export default function RoomPage({
   const [hasOptedIntoActiveRound, setHasOptedIntoActiveRound] = useState(false);
   const wasInLobbyRef = useRef(false);
   const prevStatusRef = useRef<string | undefined>(undefined);
+  const roomVersionRef = useRef(0);
+  const refreshInFlightRef = useRef(false);
+  const rejoinInFlightRef = useRef(false);
 
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const currentPlayerRef = useRef<Player | null>(null);
   currentPlayerRef.current = currentPlayer;
+
+  // Polling, Pusher and action responses can arrive out of order; only ever move forward in versions
+  const applyRoom = (next: RoomState | null | undefined) => {
+    if (!next || (next.version ?? 0) < roomVersionRef.current) return false;
+    roomVersionRef.current = next.version ?? 0;
+    setRoom(next);
+
+    const activePlayer = currentPlayerRef.current;
+    if (activePlayer && next.players[activePlayer.id]) {
+      setCurrentPlayer(next.players[activePlayer.id]);
+    }
+    return true;
+  };
 
   // Initialize or restore player from localStorage and register with the backend
   useEffect(() => {
@@ -53,17 +81,14 @@ export default function RoomPage({
         fetch(`/api/room/${roomId}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "join", player: parsed }),
+          body: JSON.stringify({ action: "join", player: parsed, hostToken: getHostToken(roomId) }),
         })
           .then((res) => res.json())
           .then((data) => {
-            if (data.room) {
-              setRoom(data.room);
-              if (data.room.players[parsed.id]) {
-                const updated = data.room.players[parsed.id];
-                setCurrentPlayer(updated);
-                localStorage.setItem(`waldo_player_${roomId}`, JSON.stringify(updated));
-              }
+            if (data.room && data.player) {
+              setCurrentPlayer(data.player);
+              localStorage.setItem(`waldo_player_${roomId}`, JSON.stringify(data.player));
+              applyRoom(data.room);
             }
           })
           .catch(console.error);
@@ -75,40 +100,35 @@ export default function RoomPage({
 
   // Fetch current room state
   const refreshRoom = async () => {
+    if (refreshInFlightRef.current) return;
+    refreshInFlightRef.current = true;
     try {
-      const res = await fetch(`/api/room/${roomId}`);
+      const res = await fetch(`/api/room/${roomId}`, { cache: "no-store" });
+      setRoomNotFound(res.status === 404);
       if (!res.ok) return;
       const data = await res.json();
-      if (prevStatusRef.current !== "round_won" && data.room?.status === "round_won") {
-        confetti({
-          particleCount: 50,
-          spread: 60,
-          origin: { y: 0.7 },
-        });
-      }
-      if (data.room?.status === "playing") {
-        setShowScoreboardModal(false);
-      }
-      prevStatusRef.current = data.room?.status;
+      if (!applyRoom(data.room)) return;
 
-      setRoom(data.room);
-      setCurrentLevel(data.currentLevel);
-
+      // If player is missing from server state (e.g. room expired), re-register once
       const activePlayer = currentPlayerRef.current;
-      if (activePlayer) {
-        // If player is missing from server state (e.g. server restarted or race condition), re-register!
-        if (!data.room.players || !data.room.players[activePlayer.id]) {
-          fetch(`/api/room/${roomId}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ action: "join", player: activePlayer }),
+      if (activePlayer && !data.room.players[activePlayer.id] && !rejoinInFlightRef.current) {
+        rejoinInFlightRef.current = true;
+        fetch(`/api/room/${roomId}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "join", player: activePlayer, hostToken: getHostToken(roomId) }),
+        })
+          .then((r) => r.json())
+          .then((joined) => applyRoom(joined.room))
+          .catch(console.error)
+          .finally(() => {
+            rejoinInFlightRef.current = false;
           });
-        } else {
-          setCurrentPlayer(data.room.players[activePlayer.id]);
-        }
       }
     } catch (err) {
       console.error("Failed to fetch room:", err);
+    } finally {
+      refreshInFlightRef.current = false;
     }
   };
 
@@ -122,35 +142,13 @@ export default function RoomPage({
 
     if (pusher) {
       channel = pusher.subscribe(`room-${roomId}`);
-      channel.bind("player-joined", (data: { room: RoomState }) => {
-        setRoom(data.room);
-      });
-      channel.bind("round-started", (data: { room: RoomState; currentLevel: Level }) => {
-        setRoom(data.room);
-        setCurrentLevel(data.currentLevel);
-        setMarkers([]);
-        setShowScoreboardModal(false);
-      });
-      channel.bind("round-won", (data: { room: RoomState }) => {
-        setRoom(data.room);
-        confetti({
-          particleCount: 50,
-          spread: 60,
-          origin: { y: 0.7 },
-        });
-      });
-      channel.bind("game-reset", (data: { room: RoomState }) => {
-        setRoom(data.room);
-        setMarkers([]);
-        setShowScoreboardModal(false);
-      });
-      channel.bind("game-finished", (data: { room: RoomState }) => {
-        setRoom(data.room);
-      });
+      for (const event of ["player-joined", "round-started", "round-won", "game-reset", "game-finished"]) {
+        channel.bind(event, (data: { room: RoomState }) => applyRoom(data.room));
+      }
     }
 
-    // Polling fallback every 800ms
-    const interval = setInterval(refreshRoom, 800);
+    // Polling keeps everyone in sync; with Pusher it is only a safety net
+    const interval = setInterval(refreshRoom, pusher ? 3000 : 1000);
 
     return () => {
       clearInterval(interval);
@@ -160,6 +158,36 @@ export default function RoomPage({
       }
     };
   }, [roomId]);
+
+  // React to status transitions exactly once, however the new state arrived
+  useEffect(() => {
+    const status = room?.status;
+    if (status === prevStatusRef.current) return;
+
+    if (status === "round_won" && prevStatusRef.current !== undefined) {
+      confetti({
+        particleCount: 50,
+        spread: 60,
+        origin: { y: 0.7 },
+      });
+    }
+    if (status === "playing" || status === "lobby") {
+      setShowScoreboardModal(false);
+    }
+    prevStatusRef.current = status;
+  }, [room?.status]);
+
+  // Preload the next map while players look at the round result, so it shows instantly
+  useEffect(() => {
+    if (!room) return;
+    const nextLevel = levelForRound(room, room.currentRoundIndex + 1);
+    if (nextLevel) {
+      for (const src of [nextLevel.image.replace(/\.webp$/, "-preview.webp"), nextLevel.image]) {
+        const img = new window.Image();
+        img.src = src;
+      }
+    }
+  }, [room?.currentRoundIndex]);
 
   // Round stopwatch timer
   useEffect(() => {
@@ -190,6 +218,22 @@ export default function RoomPage({
     }
   }, [room?.status]);
 
+  // Actions: apply the server's response directly so a poll that is already in flight can't hide it
+  const postAction = async (payload: Record<string, unknown>) => {
+    try {
+      const res = await fetch(`/api/room/${roomId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...payload, hostToken: getHostToken(roomId) }),
+      });
+      const data = await res.json();
+      if (!res.ok) console.error(`Action "${payload.action}" rejected:`, data.error);
+      applyRoom(data.room);
+    } catch (err) {
+      console.error(`Action "${payload.action}" failed:`, err);
+    }
+  };
+
   // Actions
   const handleJoin = async (name: string, avatar: string, color: string) => {
     const id = currentPlayer?.id || `p_${Math.random().toString(36).substring(2, 9)}`;
@@ -204,67 +248,54 @@ export default function RoomPage({
       lastActive: Date.now(),
     };
 
-    setCurrentPlayer(newPlayer);
-    localStorage.setItem(`waldo_player_${roomId}`, JSON.stringify(newPlayer));
-
+    setJoinError("");
     const res = await fetch(`/api/room/${roomId}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "join", player: newPlayer }),
+      body: JSON.stringify({ action: "join", player: newPlayer, hostToken: getHostToken(roomId) }),
     });
+    const data = await res.json().catch(() => ({}));
 
-    if (res.ok) {
-      const data = await res.json();
-      setRoom(data.room);
+    if (!res.ok) {
+      setJoinError(data.error || "Could not join the room.");
+      return;
+    }
+    {
       const activeP = data.player || data.room.players[id];
       if (activeP) {
         setCurrentPlayer(activeP);
         localStorage.setItem(`waldo_player_${roomId}`, JSON.stringify(activeP));
       }
+      applyRoom(data.room);
     }
+  };
+
+  const handleSetLevels = async (levelIds: number[]) => {
+    if (!currentPlayer?.isHost) return;
+    await postAction({ action: "set-levels", levelIds });
   };
 
   const handleStartGame = async () => {
     if (!currentPlayer?.isHost) return;
     setMarkers([]);
-    await fetch(`/api/room/${roomId}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "start", hostId: currentPlayer.id, roundIndex: 0 }),
-    });
-    refreshRoom();
+    await postAction({ action: "start", roundIndex: 0 });
   };
 
   const handleNextRound = async () => {
     if (!currentPlayer?.isHost || !room) return;
     setMarkers([]);
     const nextIdx = room.currentRoundIndex + 1;
-    await fetch(`/api/room/${roomId}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "start", hostId: currentPlayer.id, roundIndex: nextIdx }),
-    });
-    refreshRoom();
+    await postAction({ action: "start", roundIndex: nextIdx });
   };
 
   const handleFinishGameEarly = async () => {
     if (!currentPlayer?.isHost || !room) return;
-    await fetch(`/api/room/${roomId}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "finish", hostId: currentPlayer.id }),
-    });
-    refreshRoom();
+    await postAction({ action: "finish" });
   };
 
   const handlePlayAgain = async () => {
     if (!currentPlayer?.isHost) return;
-    await fetch(`/api/room/${roomId}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "reset", hostId: currentPlayer.id }),
-    });
-    refreshRoom();
+    await postAction({ action: "reset" });
   };
 
   const handleResetToLobby = async () => {
@@ -272,24 +303,14 @@ export default function RoomPage({
     setMarkers([]);
     setHasOptedIntoActiveRound(false);
     wasInLobbyRef.current = true;
-    await fetch(`/api/room/${roomId}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "reset", hostId: currentPlayer.id }),
-    });
-    refreshRoom();
+    await postAction({ action: "reset" });
   };
 
   const handleRestartGame = async () => {
     if (!currentPlayer?.isHost || !room) return;
     setMarkers([]);
     setHasOptedIntoActiveRound(true);
-    await fetch(`/api/room/${roomId}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "restart", hostId: currentPlayer.id }),
-    });
-    refreshRoom();
+    await postAction({ action: "restart" });
   };
 
   const [confirmConfig, setConfirmConfig] = useState<{
@@ -333,7 +354,7 @@ export default function RoomPage({
     showConfirm({
       title: "Stop Game & Return to Lobby?",
       description:
-        "This will stop the active round for all DXD teammates and return everyone back to the lobby. Player scores will be reset to 0.",
+        "This will stop the active round for all players and return everyone back to the lobby. Player scores will be reset to 0.",
       badgeText: "Stop Active Match",
       confirmText: "Stop & Return to Lobby",
       cancelText: "Keep Playing",
@@ -391,14 +412,27 @@ export default function RoomPage({
           setMarkers((prev) => prev.filter((m) => m.id !== newMarker.id));
         }, 3000);
 
-        if (data.hit) {
-          setRoom(data.room);
-        }
+        applyRoom(data.room);
       }
     } catch (err) {
       console.error("Click submission failed:", err);
     }
   };
+
+  if (roomNotFound) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-slate-950 text-white space-y-4 px-4 text-center">
+        <AlertCircle className="w-10 h-10 text-rose-500" />
+        <h1 className="text-xl font-bold">Room {roomId.toUpperCase()} doesn&apos;t exist</h1>
+        <p className="text-sm text-slate-400 max-w-sm">
+          The code may be mistyped, or the room expired after a day of inactivity. Ask the host for a fresh invite link, or host your own game.
+        </p>
+        <Link href="/" className="px-4 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-sm font-bold transition-colors">
+          Back to home
+        </Link>
+      </div>
+    );
+  }
 
   if (!room) {
     return (
@@ -447,6 +481,9 @@ export default function RoomPage({
           room={room}
           currentPlayer={currentPlayer}
           onJoin={handleJoin}
+          joinError={joinError}
+          onSetLevels={handleSetLevels}
+          levels={levels}
           onStartGame={handleStartGame}
           onRestartGame={requestRestartGame}
           shareUrl={shareUrl}
@@ -496,7 +533,7 @@ export default function RoomPage({
                 showConfirm({
                   title: "Stop Game & Return to Lobby?",
                   description:
-                    "As the room host, stopping the game will end the active round for all DXD teammates and return everyone to the lobby.",
+                    "As the room host, stopping the game will end the active round for all players and return everyone to the lobby.",
                   badgeText: "Host Action",
                   confirmText: "Stop & Return to Lobby",
                   cancelText: "Keep Playing",
@@ -507,7 +544,7 @@ export default function RoomPage({
               } else {
                 showConfirm({
                   title: "Leave Game?",
-                  description: "Are you sure you want to leave room DXD and return to the main menu?",
+                  description: `Are you sure you want to leave room ${roomId.toUpperCase()} and return to the main menu?`,
                   badgeText: "Leave Room",
                   confirmText: "Leave Game",
                   cancelText: "Stay in Game",
